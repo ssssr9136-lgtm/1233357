@@ -1,0 +1,805 @@
+#!/usr/bin/env python3
+"""
+╔══════════════════════════════════════════╗
+║          A S H E N   R E A L M          ║
+║      A Dark Fantasy Terminal RPG         ║
+╚══════════════════════════════════════════╝
+
+Requirements:
+  pip install anthropic
+
+Set your API key:
+  export ANTHROPIC_API_KEY=your_key_here
+
+Then run:
+  python3 ashen_realm.py
+"""
+
+import os
+import sys
+import json
+import time
+import random
+import textwrap
+import shutil
+from dataclasses import dataclass, field
+from typing import Optional
+
+# ── Try to import anthropic ──────────────────────────────────────────────────
+try:
+    import anthropic
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TERMINAL HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def term_width() -> int:
+    return shutil.get_terminal_size((80, 24)).columns
+
+def clr():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+# ANSI colour codes (Windows users: works on Win10+ terminal)
+class C:
+    RESET  = '\033[0m'
+    BOLD   = '\033[1m'
+    DIM    = '\033[2m'
+    ITALIC = '\033[3m'
+    UNDER  = '\033[4m'
+    # Colours
+    GOLD   = '\033[38;5;220m'
+    GOLD2  = '\033[38;5;178m'
+    EMBER  = '\033[38;5;208m'
+    BLOOD  = '\033[38;5;124m'
+    GREEN  = '\033[38;5;76m'
+    BLUE   = '\033[38;5;75m'
+    PURPLE = '\033[38;5;135m'
+    GREY   = '\033[38;5;244m'
+    WHITE  = '\033[38;5;253m'
+    RED    = '\033[38;5;196m'
+    CYAN   = '\033[38;5;87m'
+
+def c(colour: str, text: str) -> str:
+    return f"{colour}{text}{C.RESET}"
+
+def hr(char='─', colour=C.GOLD2):
+    w = min(term_width(), 80)
+    print(c(colour, char * w))
+
+def center(text: str, colour=C.GOLD):
+    w = min(term_width(), 80)
+    print(c(colour, text.center(w)))
+
+def wrap_print(text: str, colour=C.WHITE, indent=2, width=76):
+    prefix = ' ' * indent
+    lines = textwrap.wrap(text, width=width - indent)
+    for line in lines:
+        print(f"{colour}{prefix}{line}{C.RESET}")
+
+def slow_print(text: str, colour=C.WHITE, delay=0.018, indent=2):
+    prefix = ' ' * indent
+    width = min(term_width(), 78) - indent
+    lines = textwrap.wrap(text, width=width)
+    for i, line in enumerate(lines):
+        print(f"{colour}{prefix}", end='', flush=True)
+        for ch in line:
+            print(ch, end='', flush=True)
+            time.sleep(delay)
+        print(C.RESET)
+    print()
+
+def bar(current: int, maximum: int, width: int = 20, fill='█', empty='░',
+        colour=C.GREEN) -> str:
+    filled = int((current / max(maximum, 1)) * width)
+    filled = max(0, min(filled, width))
+    bar_str = fill * filled + empty * (width - filled)
+    return f"{colour}{bar_str}{C.RESET}"
+
+def press_enter(msg="  Press Enter to continue..."):
+    print(c(C.GREY, msg))
+    input()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DATA CLASSES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class Item:
+    name: str
+    icon: str
+    rarity: str = 'common'   # common | magic | rare
+    item_type: str = 'misc'  # weapon | armour | potion | misc
+
+    def display(self) -> str:
+        colour = {
+            'common': C.WHITE,
+            'magic':  C.BLUE,
+            'rare':   C.PURPLE,
+        }.get(self.rarity, C.WHITE)
+        return c(colour, f"{self.icon} {self.name}")
+
+
+@dataclass
+class Enemy:
+    name: str
+    icon: str
+    hp: int
+    max_hp: int
+    atk: int
+    defence: int = 0
+
+    def is_alive(self) -> bool:
+        return self.hp > 0
+
+    def hp_bar(self) -> str:
+        return bar(self.hp, self.max_hp, 16, colour=C.BLOOD)
+
+
+@dataclass
+class Hero:
+    name: str
+    cls: str
+    hp: int
+    max_hp: int
+    mp: int
+    max_mp: int
+    atk: int
+    defence: int
+    spd: int
+    lck: int
+    level: int = 1
+    xp: int = 0
+    xp_next: int = 100
+    gold: int = 0
+    spells: list = field(default_factory=list)
+    inventory: list = field(default_factory=list)
+
+    def hp_bar(self) -> str:
+        colour = C.RED if self.hp < self.max_hp * 0.3 else C.GREEN
+        return bar(self.hp, self.max_hp, 20, colour=colour)
+
+    def mp_bar(self) -> str:
+        return bar(self.mp, self.max_mp, 20, colour=C.BLUE)
+
+    def xp_bar(self) -> str:
+        return bar(self.xp, self.xp_next, 20, colour=C.GOLD2)
+
+    def is_alive(self) -> bool:
+        return self.hp > 0
+
+    def level_up(self):
+        self.xp -= self.xp_next
+        self.level += 1
+        self.xp_next = int(self.xp_next * 1.5)
+        self.max_hp += 15; self.hp = self.max_hp
+        self.max_mp += 10; self.mp = self.max_mp
+        self.atk += 3; self.defence += 2
+
+    def has_potion(self) -> bool:
+        return any('Potion' in i.name for i in self.inventory)
+
+    def use_potion(self) -> int:
+        for i, item in enumerate(self.inventory):
+            if 'Potion' in item.name:
+                self.inventory.pop(i)
+                heal = random.randint(25, 45)
+                self.hp = min(self.max_hp, self.hp + heal)
+                return heal
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AI NARRATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+SYSTEM_PROMPT = """You are the dungeon master of "Ashen Realm," a dark fantasy RPG.
+Narrate in a vivid, gothic, immersive style — rich imagery, tension, atmosphere.
+Keep each narrative response to 2-4 sentences. Be creative, varied, and dramatic.
+Respond ONLY with valid JSON (no markdown, no extra text):
+{
+  "narrative": "2-4 sentence atmospheric description",
+  "outcome": "explore|combat_start|combat_continue|loot|descend|death|rest",
+  "enemy": {"name":"...","hp":N,"max_hp":N,"atk":N,"defence":N,"icon":"emoji"},
+  "loot": {"name":"...","icon":"emoji","rarity":"common|magic|rare","item_type":"weapon|armour|potion|misc"},
+  "hp_delta": N,
+  "mp_delta": N,
+  "enemy_hp_delta": N,
+  "xp_gain": N,
+  "gold_gain": N,
+  "combat_ended": true_or_false
+}
+Only include "enemy" key if outcome is "combat_start".
+Only include "loot" key if a loot drop occurs.
+All numeric deltas default to 0 if not applicable.
+combat_ended defaults to false.
+"""
+
+
+class AIClient:
+    def __init__(self):
+        self.client = None
+        self.fallback_mode = False
+        if not AI_AVAILABLE:
+            self.fallback_mode = True
+            return
+        api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+        if not api_key:
+            self.fallback_mode = True
+            return
+        try:
+            self.client = anthropic.Anthropic(api_key=api_key)
+        except Exception:
+            self.fallback_mode = True
+
+    def narrate(self, prompt: str) -> dict:
+        if self.fallback_mode or self.client is None:
+            return self._fallback(prompt)
+        try:
+            msg = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=600,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            text = msg.content[0].text.strip()
+            text = text.replace('```json', '').replace('```', '').strip()
+            return json.loads(text)
+        except Exception as e:
+            return self._fallback(prompt)
+
+    def _fallback(self, prompt: str) -> dict:
+        """Procedural fallback when AI is unavailable."""
+        p = prompt.lower()
+        # Combat actions
+        if 'attack' in p or 'strike' in p or 'cast' in p:
+            dmg_to_enemy = random.randint(8, 22)
+            dmg_to_hero  = random.randint(4, 14)
+            narratives = [
+                "Steel rings against bone as you drive your blade home. The creature howls and retaliates with savage fury.",
+                "Your strike lands true, drawing dark ichor. The beast snarls and lunges back at you with desperate rage.",
+                "The blow connects with a satisfying crack. Pain lances through you as claws rake across your side.",
+            ]
+            return {
+                "narrative": random.choice(narratives),
+                "outcome": "combat_continue",
+                "hp_delta": -dmg_to_hero,
+                "mp_delta": 0,
+                "enemy_hp_delta": -dmg_to_enemy,
+                "xp_gain": 0,
+                "gold_gain": 0,
+                "combat_ended": False,
+            }
+        if 'flee' in p or 'run' in p:
+            if random.random() < 0.5:
+                return {"narrative": "You dash through the darkness, heart hammering, and escape the creature's grasp.", "outcome": "explore", "hp_delta": 0, "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 0, "gold_gain": 0, "combat_ended": True}
+            return {"narrative": "You attempt to flee but the creature cuts off your escape, forcing you back into combat.", "outcome": "combat_continue", "hp_delta": -random.randint(3,10), "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 0, "gold_gain": 0, "combat_ended": False}
+        if 'defend' in p:
+            return {"narrative": "You raise your guard, weathering the onslaught. The creature's claws glance off your defence.", "outcome": "combat_continue", "hp_delta": -random.randint(1,5), "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 0, "gold_gain": 0, "combat_ended": False}
+        # Explore actions
+        if 'rest' in p:
+            heal = random.randint(10, 25)
+            return {"narrative": "You find a damp alcove and rest briefly. The dungeon's oppressive silence presses in around you.", "outcome": "rest", "hp_delta": heal, "mp_delta": random.randint(5,15), "enemy_hp_delta": 0, "xp_gain": 0, "gold_gain": 0, "combat_ended": False}
+        if 'search' in p:
+            if random.random() < 0.45:
+                loots = [
+                    {"name":"Health Potion","icon":"🧪","rarity":"common","item_type":"potion"},
+                    {"name":"Shadow Dagger","icon":"🗡️","rarity":"magic","item_type":"weapon"},
+                    {"name":"Arcane Tome","icon":"📖","rarity":"rare","item_type":"misc"},
+                    {"name":"Gold Coins","icon":"💰","rarity":"common","item_type":"misc"},
+                ]
+                loot = random.choice(loots)
+                gold = random.randint(5, 20)
+                return {"narrative": "Your fingers find a hidden cache behind a loose stone. Something glints in the gloom.", "outcome": "loot", "loot": loot, "hp_delta": 0, "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 10, "gold_gain": gold, "combat_ended": False}
+            return {"narrative": "You comb the chamber carefully but find nothing but dust, old bones, and despair.", "outcome": "explore", "hp_delta": 0, "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 0, "gold_gain": 0, "combat_ended": False}
+        if 'descend' in p:
+            return {"narrative": "The stone steps spiral downward into deeper darkness. A cold wind rises from below, carrying the scent of old death.", "outcome": "descend", "hp_delta": 0, "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 5, "gold_gain": 0, "combat_ended": False}
+        # Default: venture / new room
+        if random.random() < 0.5:
+            enemies = [
+                {"name":"Rotting Skeleton","icon":"💀","hp":30,"max_hp":30,"atk":8,"defence":3},
+                {"name":"Cave Troll","icon":"👹","hp":55,"max_hp":55,"atk":14,"defence":6},
+                {"name":"Shadow Wraith","icon":"👻","hp":40,"max_hp":40,"atk":11,"defence":4},
+                {"name":"Giant Spider","icon":"🕷️","hp":25,"max_hp":25,"atk":9,"defence":2},
+                {"name":"Goblin Shaman","icon":"🧙","hp":35,"max_hp":35,"atk":12,"defence":3},
+            ]
+            enemy = random.choice(enemies)
+            narratives = [
+                f"The torchlight catches movement — a {enemy['name']} lurches from the shadows, eyes burning with malice.",
+                f"A {enemy['name']} blocks the passage ahead, rattling and hissing with predatory hunger.",
+                f"From the darkness emerges a {enemy['name']}, drawn by the scent of the living.",
+            ]
+            return {"narrative": random.choice(narratives), "outcome": "combat_start", "enemy": enemy, "hp_delta": 0, "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 0, "gold_gain": 0, "combat_ended": False}
+        atmospheres = [
+            "The passage opens into a cavernous hall. Broken pillars rise like rotted teeth, draped in webs older than memory.",
+            "You step through a flooded corridor, black water swirling around your ankles. Something stirs beneath the surface.",
+            "The walls here are carved with warnings in an ancient tongue. Scorch marks suggest whatever left them did not survive.",
+            "A flickering torch still burns in its sconce — recently lit. You are not alone in this dungeon.",
+            "The bones of previous adventurers litter the floor, their equipment long since claimed by rust and rot.",
+        ]
+        return {"narrative": random.choice(atmospheres), "outcome": "explore", "hp_delta": 0, "mp_delta": 0, "enemy_hp_delta": 0, "xp_gain": 0, "gold_gain": 0, "combat_ended": False}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DISPLAY FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def print_title():
+    clr()
+    hr('═')
+    center("░▒▓  A S H E N   R E A L M  ▓▒░", C.GOLD)
+    center("A Chronicle of Ruin & Glory", C.GOLD2)
+    hr('═')
+    print()
+
+def print_hud(hero: Hero, floor: int, enemy: Optional[Enemy] = None):
+    hr('─', C.GREY)
+    w = min(term_width(), 80)
+
+    # Hero stats line
+    print(c(C.GOLD, f"  {hero.name}") + c(C.GREY, f" · Lv{hero.level} {hero.cls} · ") +
+          c(C.GOLD2, f"Floor {floor}") + c(C.GREY, f"  |  ") + c(C.GOLD, f"Gold: {hero.gold}"))
+
+    # HP / MP bars
+    print(f"  {c(C.RED,'❤')} {hero.hp_bar()} {c(C.GREY,f'{hero.hp}/{hero.max_hp}')}   "
+          f"{c(C.BLUE,'✦')} {hero.mp_bar()} {c(C.GREY,f'{hero.mp}/{hero.max_mp}')}")
+
+    # XP bar
+    print(f"  {c(C.GOLD2,'★')} {hero.xp_bar()} {c(C.GREY,f'{hero.xp}/{hero.xp_next} XP')}   "
+          f"{c(C.GREY,f'ATK:{hero.atk} DEF:{hero.defence} SPD:{hero.spd} LCK:{hero.lck}')}")
+
+    # Enemy bar (if in combat)
+    if enemy:
+        print()
+        print(f"  {c(C.EMBER, f'⚔ {enemy.icon} {enemy.name}')}  "
+              f"{enemy.hp_bar()}  {c(C.GREY, f'{enemy.hp}/{enemy.max_hp} HP')}")
+
+    hr('─', C.GREY)
+    print()
+
+def print_inventory(hero: Hero):
+    hr('─', C.GREY)
+    print(c(C.GOLD, "  🎒 Inventory"))
+    if not hero.inventory:
+        print(c(C.GREY, "     Empty satchel"))
+    else:
+        for i, item in enumerate(hero.inventory[:10], 1):
+            print(f"  {c(C.GREY,str(i)+'.')} {item.display()}")
+    hr('─', C.GREY)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MENUS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def choose(prompt: str, options: list[tuple[str, str]], colour=C.GOLD2) -> str:
+    """Display numbered options and return the chosen key."""
+    print(c(C.GOLD, f"\n  {prompt}"))
+    for i, (key, label) in enumerate(options, 1):
+        print(f"  {c(C.GOLD2, str(i)+'.')} {c(colour, label)}")
+    print()
+    while True:
+        try:
+            raw = input(c(C.GREY, "  › ")).strip()
+            if raw.isdigit():
+                idx = int(raw) - 1
+                if 0 <= idx < len(options):
+                    return options[idx][0]
+            # Allow typing the key directly
+            for key, label in options:
+                if raw.lower() == key.lower():
+                    return key
+            print(c(C.BLOOD, "  Invalid choice. Try again."))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+
+def custom_action_input() -> str:
+    print(c(C.GREY, "\n  Or type your own action (e.g. 'I search behind the altar'):"))
+    try:
+        raw = input(c(C.GOLD2, "  ✦ ")).strip()
+        return raw
+    except (EOFError, KeyboardInterrupt):
+        return ''
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHARACTER CREATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+CLASSES = {
+    'Knight': {
+        'icon': '⚔️ ', 'hp': 120, 'mp': 30, 'atk': 18, 'def': 14,
+        'spd': 8, 'lck': 6, 'spells': ['Shield Bash'],
+        'desc': 'Iron resolve, unbreakable shield. Master of blade and bulwark.',
+        'traits': '+STR  +DEF  Low Mana',
+    },
+    'Mage': {
+        'icon': '🔮', 'hp': 60, 'mp': 100, 'atk': 8, 'def': 6,
+        'spd': 10, 'lck': 8, 'spells': ['Fireball', 'Frost Nova'],
+        'desc': 'Weaver of arcane fire. Fragile yet devastating in arcane might.',
+        'traits': '+INT  +MGK  Low HP',
+    },
+    'Rogue': {
+        'icon': '🗡️ ', 'hp': 80, 'mp': 50, 'atk': 14, 'def': 9,
+        'spd': 15, 'lck': 14, 'spells': ['Shadow Strike'],
+        'desc': 'Shadow-born, blade-quick. Strikes from darkness before vanishing.',
+        'traits': '+AGI  +LCK  Balanced',
+    },
+}
+
+def character_creation() -> Hero:
+    print_title()
+    center("— The dungeon stirs beneath Ashenmoor —", C.GREY)
+    center("Darkness has devoured the kingdom's light.", C.GREY)
+    center("One soul must descend.", C.GREY)
+    print()
+    hr('─', C.GOLD2)
+    print()
+
+    # Class selection
+    print(c(C.GOLD, "  Choose your class:\n"))
+    for cls_name, data in CLASSES.items():
+        print(c(C.GOLD, f"  {data['icon']} {cls_name}"))
+        wrap_print(data['desc'], C.WHITE)
+        print(c(C.GREY, f"     {data['traits']}"))
+        print()
+
+    cls_choice = choose("Select your path:", [(k, f"{v['icon']} {k}") for k, v in CLASSES.items()])
+    cls = CLASSES[cls_choice]
+
+    # Name
+    print()
+    try:
+        name = input(c(C.GOLD, "  Enter your name, hero: ")).strip()
+    except (EOFError, KeyboardInterrupt):
+        sys.exit(0)
+    if not name:
+        name = random.choice(['Aldric', 'Seraphel', 'Corvus', 'Mira', 'Zethon'])
+        print(c(C.GREY, f"  The dungeon names you: {name}"))
+
+    hero = Hero(
+        name=name, cls=cls_choice,
+        hp=cls['hp'], max_hp=cls['hp'],
+        mp=cls['mp'], max_mp=cls['mp'],
+        atk=cls['atk'], defence=cls['def'],
+        spd=cls['spd'], lck=cls['lck'],
+        spells=list(cls['spells']),
+        inventory=[
+            Item('Iron Blade', '🗡️', 'common', 'weapon'),
+            Item('Health Potion', '🧪', 'common', 'potion'),
+        ]
+    )
+    print()
+    slow_print(
+        f"The iron gate groans open. {hero.name} the {hero.cls} steps into the Ashen Realm...",
+        C.GOLD2, delay=0.03
+    )
+    time.sleep(1)
+    return hero
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GAME LOOP
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_prompt(hero: Hero, floor: int, action: str, enemy: Optional[Enemy]) -> str:
+    inv = ', '.join(i.name for i in hero.inventory) or 'none'
+    spells = ', '.join(hero.spells) or 'none'
+    enemy_str = f"Enemy: {enemy.name} HP:{enemy.hp}/{enemy.max_hp} ATK:{enemy.atk} DEF:{enemy.defence}" if enemy else "No active enemy"
+    return (
+        f"Hero: {hero.name}, Lv{hero.level} {hero.cls}. "
+        f"HP:{hero.hp}/{hero.max_hp}, MP:{hero.mp}/{hero.max_mp}, "
+        f"ATK:{hero.atk}, DEF:{hero.defence}, SPD:{hero.spd}, LCK:{hero.lck}. "
+        f"Floor:{floor}. Inventory:{inv}. Spells:{spells}. Gold:{hero.gold}. "
+        f"{enemy_str}.\n"
+        f"Action: {action}"
+    )
+
+def apply_result(hero: Hero, enemy: Optional[Enemy], result: dict, floor: int):
+    """Mutate hero/enemy based on AI result. Returns (enemy, floor, loot_msg)."""
+    loot_msg = None
+
+    hp_d  = int(result.get('hp_delta', 0))
+    mp_d  = int(result.get('mp_delta', 0))
+    xp_g  = int(result.get('xp_gain', 0))
+    gld_g = int(result.get('gold_gain', 0))
+    e_hp  = int(result.get('enemy_hp_delta', 0))
+
+    hero.hp = max(0, min(hero.max_hp, hero.hp + hp_d))
+    hero.mp = max(0, min(hero.max_mp, hero.mp + mp_d))
+
+    if xp_g: hero.xp += xp_g
+    if gld_g: hero.gold += gld_g
+
+    # Loot
+    loot_data = result.get('loot')
+    if loot_data:
+        item = Item(
+            loot_data.get('name','Mysterious Item'),
+            loot_data.get('icon','❓'),
+            loot_data.get('rarity','common'),
+            loot_data.get('item_type','misc'),
+        )
+        hero.inventory.append(item)
+        loot_msg = item
+
+    # Enemy damage
+    if enemy and e_hp:
+        enemy.hp = max(0, enemy.hp + e_hp)
+
+    # Level up
+    leveled = False
+    if hero.xp >= hero.xp_next:
+        hero.level_up()
+        leveled = True
+
+    # New enemy
+    new_enemy = enemy
+    if result.get('outcome') == 'combat_start' and 'enemy' in result:
+        ed = result['enemy']
+        new_enemy = Enemy(
+            name=ed.get('name','Unknown Beast'),
+            icon=ed.get('icon','👾'),
+            hp=int(ed.get('hp', 30)),
+            max_hp=int(ed.get('max_hp', ed.get('hp', 30))),
+            atk=int(ed.get('atk', 10)),
+            defence=int(ed.get('defence', 3)),
+        )
+
+    # Combat ended
+    if result.get('combat_ended') or (enemy and not enemy.is_alive()):
+        new_enemy = None
+        xp_bonus = int(enemy.max_hp * 1.2) if enemy else 0
+        gold_bonus = random.randint(5, 20)
+        hero.xp += xp_bonus
+        hero.gold += gold_bonus
+        if hero.xp >= hero.xp_next:
+            hero.level_up()
+            leveled = True
+
+    # Floor descend
+    if result.get('outcome') == 'descend':
+        floor += 1
+
+    return new_enemy, floor, loot_msg, leveled
+
+
+def print_result_effects(result: dict, loot_msg, leveled: bool, hero: Hero, prev_hp: int):
+    hp_d = int(result.get('hp_delta', 0))
+    xp_g = int(result.get('xp_gain', 0))
+    gld  = int(result.get('gold_gain', 0))
+    e_hp = int(result.get('enemy_hp_delta', 0))
+
+    effects = []
+    if hp_d < 0:
+        effects.append(c(C.BLOOD, f"  ❤ -{abs(hp_d)} HP"))
+    elif hp_d > 0:
+        effects.append(c(C.GREEN, f"  ❤ +{hp_d} HP restored"))
+    if e_hp < 0:
+        effects.append(c(C.EMBER, f"  ⚔ -{abs(e_hp)} to enemy"))
+    if xp_g:
+        effects.append(c(C.GOLD2, f"  ★ +{xp_g} XP"))
+    if gld:
+        effects.append(c(C.GOLD, f"  💰 +{gld} Gold"))
+    if loot_msg:
+        effects.append(f"  {c(C.CYAN,'🎁 Found:')} {loot_msg.display()}")
+    if leveled:
+        effects.append(c(C.GOLD, f"\n  ✦ LEVEL UP! You are now level {hero.level}!"))
+
+    if effects:
+        print()
+        for e in effects:
+            print(e)
+        print()
+
+
+def explore_menu(hero: Hero) -> str:
+    options = [
+        ('venture', '🚶  Venture Deeper'),
+        ('search',  '🔍  Search the Room'),
+        ('rest',    '🕯   Rest & Recover'),
+        ('descend', '⬇   Descend a Floor'),
+    ]
+    if hero.spells:
+        options.append(('spell', f'✦   Cast {hero.spells[0]}'))
+    if hero.has_potion():
+        options.append(('potion', '🧪  Drink Potion'))
+    options.append(('inv', '🎒  View Inventory'))
+    options.append(('custom', '✍   Custom Action'))
+    return choose("What do you do?", options)
+
+
+def combat_menu(hero: Hero, enemy: Enemy) -> str:
+    options = [
+        ('attack',       '⚔   Strike'),
+        ('heavy',        '💥  Heavy Strike'),
+    ]
+    if hero.spells and hero.mp >= 15:
+        options.append(('spell', f'✦   {hero.spells[0]}'))
+    options.extend([
+        ('defend',  '🛡   Defend'),
+        ('flee',    '💨  Flee'),
+    ])
+    if hero.has_potion():
+        options.append(('potion', '🧪  Drink Potion'))
+    options.append(('custom', '✍   Custom Action'))
+    return choose(f"Combat: {enemy.icon} {enemy.name}", options)
+
+
+def action_to_prompt(choice: str, hero: Hero, enemy: Optional[Enemy], custom: str = '') -> str:
+    mapping = {
+        'venture':  'The hero ventures deeper into the dungeon, moving cautiously through the darkness.',
+        'search':   'The hero carefully searches the room for hidden items, secrets, or traps.',
+        'rest':     'The hero rests briefly to recover health and mana.',
+        'descend':  'The hero descends the stairs to the next dungeon floor.',
+        'attack':   f'The hero attacks {enemy.name if enemy else "the enemy"} with their weapon.',
+        'heavy':    f'The hero performs a heavy strike against {enemy.name if enemy else "the enemy"}, risking defence for power.',
+        'defend':   f'The hero takes a defensive stance against {enemy.name if enemy else "the enemy"}.',
+        'flee':     f'The hero attempts to flee from {enemy.name if enemy else "the enemy"}.',
+        'potion':   'The hero drinks a health potion to restore vitality.',
+        'spell':    f'The hero casts {hero.spells[0] if hero.spells else "a spell"} with arcane energy.',
+        'custom':   custom,
+    }
+    return mapping.get(choice, choice)
+
+
+def death_screen(hero: Hero, floor: int):
+    clr()
+    hr('═', C.BLOOD)
+    center("☠  S L A I N  ☠", C.BLOOD)
+    hr('═', C.BLOOD)
+    print()
+    slow_print(
+        f"{hero.name} the {hero.cls} fell on floor {floor}, "
+        f"reaching level {hero.level} before being consumed by the darkness.",
+        C.GREY, delay=0.025
+    )
+    print()
+    print(c(C.GREY, f"  Final Stats:  Gold {hero.gold}  |  Floors Explored: {floor}  |  Level: {hero.level}"))
+    print()
+    hr('─', C.BLOOD)
+
+
+def victory_check(floor: int) -> bool:
+    return floor >= 10
+
+
+def run_game():
+    ai = AIClient()
+
+    if not AI_AVAILABLE:
+        print(c(C.GOLD2, "\n  📦 Install the Anthropic package for AI narration:"))
+        print(c(C.GREY,  "     pip install anthropic"))
+        print(c(C.GOLD2, "\n  🔑 Then set your API key:"))
+        print(c(C.GREY,  "     export ANTHROPIC_API_KEY=your_key_here"))
+        print(c(C.GREY,  "\n  Running with procedural fallback narration...\n"))
+        time.sleep(2)
+    elif ai.fallback_mode:
+        print(c(C.GOLD2, "\n  ⚠  ANTHROPIC_API_KEY not set. Running in fallback mode."))
+        print(c(C.GREY,  "     Set the env var for AI-powered narration.\n"))
+        time.sleep(2)
+
+    while True:  # Allow replaying
+        hero = character_creation()
+        floor = 1
+        enemy: Optional[Enemy] = None
+        scene = 'explore'
+
+        while True:
+            clr()
+            print_hud(hero, floor, enemy)
+
+            # Choose action
+            if scene == 'combat' and enemy:
+                choice = combat_menu(hero, enemy)
+            else:
+                scene = 'explore'
+                choice = explore_menu(hero)
+
+            # Handle non-AI choices
+            if choice == 'inv':
+                print_inventory(hero)
+                press_enter()
+                continue
+
+            if choice == 'potion' and scene == 'explore':
+                heal = hero.use_potion()
+                if heal:
+                    clr()
+                    print_hud(hero, floor)
+                    slow_print(f"You uncork the flask and drink deeply. The warmth of {heal} restored HP flows through you.", C.GREEN)
+                    press_enter()
+                continue
+
+            custom_text = ''
+            if choice == 'custom':
+                custom_text = custom_action_input()
+                if not custom_text:
+                    continue
+
+            # Build prompt & call AI
+            action_desc = action_to_prompt(choice, hero, enemy, custom_text)
+            prompt = build_prompt(hero, floor, action_desc, enemy)
+
+            print()
+            print(c(C.GREY, "  ∿ The dungeon stirs..."), end='', flush=True)
+            result = ai.narrate(prompt)
+            print('\r' + ' ' * 30 + '\r', end='')
+
+            # Print narrative
+            clr()
+            print_hud(hero, floor, enemy)
+            print()
+            slow_print(result.get('narrative', '...'), C.WHITE, delay=0.02)
+
+            # Apply result
+            prev_hp = hero.hp
+            enemy, floor, loot_msg, leveled = apply_result(hero, enemy, result, floor)
+
+            # Print effects
+            print_result_effects(result, loot_msg, leveled, hero, prev_hp)
+
+            # Handle new enemy
+            outcome = result.get('outcome', 'explore')
+            if outcome == 'combat_start' and enemy:
+                print(c(C.EMBER, f"  ⚔  {enemy.icon} {enemy.name} challenges you! (HP: {enemy.hp})"))
+                scene = 'combat'
+            elif outcome == 'combat_continue' and enemy and enemy.is_alive():
+                scene = 'combat'
+            else:
+                if scene == 'combat' and (not enemy or not enemy.is_alive()):
+                    enemy = None
+                scene = 'explore'
+
+            # Potion in combat
+            if choice == 'potion' and scene == 'combat':
+                heal = hero.use_potion()
+                if heal:
+                    print(c(C.GREEN, f"  🧪 Potion restores {heal} HP!"))
+
+            # Death check
+            if not hero.is_alive():
+                death_screen(hero, floor)
+                again = choose("What now?", [('yes','↺  Rise Again'), ('no','✕  Quit')])
+                if again == 'yes':
+                    break  # restart outer loop
+                else:
+                    print(c(C.GREY, "\n  The realm remembers your sacrifice.\n"))
+                    sys.exit(0)
+
+            # Victory
+            if victory_check(floor):
+                clr()
+                hr('═', C.GOLD)
+                center("✦  V I C T O R Y  ✦", C.GOLD)
+                hr('═', C.GOLD)
+                slow_print(
+                    f"Against all odds, {hero.name} the {hero.cls} has conquered the Ashen Realm! "
+                    f"Level {hero.level}, {hero.gold} gold, floor {floor}. The light returns to Ashenmoor.",
+                    C.GOLD2, delay=0.03
+                )
+                print()
+                again = choose("Play again?", [('yes','↺  New Adventure'), ('no','✕  Quit')])
+                if again == 'yes':
+                    break
+                else:
+                    sys.exit(0)
+
+            press_enter("  Press Enter to continue your descent...")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == '__main__':
+    try:
+        run_game()
+    except KeyboardInterrupt:
+        print(c(C.GREY, "\n\n  The darkness claims you. Farewell.\n"))
+        sys.exit(0)
